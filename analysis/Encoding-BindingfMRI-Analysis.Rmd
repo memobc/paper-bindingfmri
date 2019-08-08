@@ -1,0 +1,638 @@
+---
+title: "Binding fMRI - Analyses of feature encoding and integration"
+output:
+  html_notebook:
+    code_folding: hide
+    fontsize: 6pt
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px}
+td {  /* Table  */
+  font-size: 12px}
+h1.title {
+  font-size: 30px}
+h1 { /* Header 1 */
+  font-size: 24px}
+h2 { /* Header 2 */
+    font-size: 20px}
+h3 { /* Header 3 */
+    font-size: 18px}
+code.r{ /* Code block */
+    font-size: 12px}
+</style>
+
+
+The analyses presented here test subsequent memory effects during encoding of a multi-feature event.  
+
+Mean single trial beta estimates were extracted from each of 204 ROIs across the cortex and medial temporal lobe (see ~/data/bindingfmri_wholebrain_ROIs_info.csv).  
+
+Each event includes 3 associations encoded in parallel -- an object with a i) color, ii) sound, and iii) scene location.  
+
+Subsequent memory is calculated as the number of features (0-3) later correctly recalled, as well as feature-specific estimates of memory (correct, 1, vs. incorrect, 0).  
+
+The relationship between activity (each ROI's beta series) and subsequent memory is estimated using linear mixed effects models with the following pipeline:  
+
+1) Data cleaned by removing outlying betas (z > |4|) within subject and ROI.  
+2) Fixed effect predictors are mean-centered (where appropriate).  
+3) Model initially specified with a maximal random effects structure, but to avoid convergence problems and singular fits:  
+a) Random effects correlations are constrained to zero for all models.  
+b) The random effect structure of models with > 2 fixed effect predictors is simplified by iteratively removing slopes that do not change the model fit.  
+4) Significance of the fixed effects (slope != 0?) is tested using t-tests with Satterthwaite’s approximation method.
+
+```{r, include=FALSE}
+
+library(ggplot2)
+library(ggpubr)
+library(ggforce)
+library(tidyr)
+library(dplyr)
+library(knitr)
+library(pander)
+library(lme4)
+library(lmerTest)
+library(MuMIn)
+library(ez)
+library(lsr)
+library(psych)
+library(reshape2)
+library(scales)
+library(pracma)
+library(mosaic)
+library(lessR)
+
+
+### define computer path
+myDir <- '/Users/memolab/Google Drive/MemoLab/Manuscripts/Orbit-Encoding/paper-bindingfmri-repo/'
+#myDir <- '/Users/rosecooper/Documents/MemoLab/Manuscripts/Orbit-Encoding/paper-bindingfmri-repo/'
+
+```
+
+# Behavioral Data
+```{r}
+
+### Load in behavioral data for all 27 subjects:
+behavData <- read.csv(paste(myDir,'data/AllSubjects_bindingfMRI-behavior.csv',sep = ""), header = TRUE)
+behav_subs <- unique(behavData$SubID)
+
+# Create additional columns for subsequent memory measures of interest
+behavData$Sound[behavData$EmotionCorrect == 1 & behavData$EmotionConfidence == 1] <- 1 # only sucessful if correct and high confidence
+behavData$Sound[behavData$EmotionCorrect == 1 & behavData$EmotionConfidence == 0] <- 0
+behavData$Sound[behavData$EmotionCorrect == 0] <- 0
+
+# define 'success' thresholds for color and scene trials -> 75% probability within von Mises
+cCutOff = 42
+sCutOff = 24
+
+# feature accuracy
+behavData$Color[behavData$ColAbsError <=cCutOff] <- 1  #correct if error (how far from target) less than or equal to threshold
+behavData$Color[behavData$ColAbsError > cCutOff] <- 0
+behavData$Scene[behavData$SceAbsError <=sCutOff] <- 1 #correct if error (how far from target) less than or equal to threshold
+behavData$Scene[behavData$SceAbsError > sCutOff] <- 0
+
+
+# overall memory detail (accounting for feature success - 0-3)
+behavData$MemoryDetail <- behavData$Sound + behavData$Color + behavData$Scene
+
+
+#### separate trial-unique conditions:
+## 1 feature
+behavData$Color.Only   <- 0
+behavData$Sound.Only <- 0
+behavData$Scene.Only   <- 0
+behavData$Color.Only[behavData$Color == 1 & behavData$Sound == 0 & behavData$Scene == 0]   <- 1
+behavData$Sound.Only[behavData$Color == 0 & behavData$Sound == 1 & behavData$Scene == 0] <- 1
+behavData$Scene.Only[behavData$Color == 0 & behavData$Sound == 0 & behavData$Scene == 1]   <- 1
+behavData$OneFeature.Only <- behavData$Color.Only + behavData$Sound.Only + behavData$Scene.Only
+
+## 2 features
+behavData$Color.Scene   <- 0
+behavData$Sound.Color <- 0
+behavData$Scene.Sound <- 0
+behavData$Color.Scene[behavData$Color == 1 & behavData$Sound == 0 & behavData$Scene == 1]   <- 1
+behavData$Sound.Color[behavData$Color == 1 & behavData$Sound == 1 & behavData$Scene == 0] <- 1
+behavData$Scene.Sound[behavData$Color == 0 & behavData$Sound == 1 & behavData$Scene == 1] <- 1
+
+## 3 features
+behavData$Color.Scene.Sound  <- 0
+behavData$Color.Scene.Sound[behavData$Color == 1 & behavData$Sound == 1 & behavData$Scene == 1] <- 1
+
+
+# ****now format behavioral data to match single trial beta ENCODING order**** -- by encoding onset:
+behavData <- behavData[order(behavData$StudyTrial),]
+behavData <- data.frame(behavData[order(behavData$SubID),])
+
+nTotal <- nrow(behavData)
+
+
+# print percentage correct for each feature
+feature.accuracy <- behavData[,c("TotalEncodingTrial","Color","Sound","Scene")]
+kable(feature.accuracy %>% gather(Feature,Accuracy,Color:Scene) %>%
+                          group_by(Feature) %>%
+                          summarise(Memory = mean(Accuracy)),format="pandoc",
+                                    caption="Feature Accuracy")
+
+### print number of trials that uniquely fall into each possible combination:
+cat('\nNone recalled trials =', nrow(subset(behavData,MemoryDetail == 0)),'(',round(((nrow(subset(behavData,MemoryDetail == 0)))/nTotal)*100,2),'%)\n')
+cat('Color only trials =', sum(behavData$Color.Only),'(',round(((sum(behavData$Color.Only))/nTotal)*100,2),'%)\n')
+cat('Scene only trials =', sum(behavData$Scene.Only),'(',round(((sum(behavData$Scene.Only))/nTotal)*100,2),'%)\n')
+cat('Sound only trials =', sum(behavData$Sound.Only),'(',round(((sum(behavData$Sound.Only))/nTotal)*100,2),'%)\n')
+cat('Color & Scene only trials =', sum(behavData$Color.Scene),'(',round(((sum(behavData$Color.Scene))/nTotal)*100,2),'%)\n')
+cat('Scene & Sound only trials =', sum(behavData$Scene.Sound),'(',round(((sum(behavData$Scene.Sound))/nTotal)*100,2),'%)\n')
+cat('Sound & Color only trials =', sum(behavData$Sound.Color),'(',round(((sum(behavData$Sound.Color))/nTotal)*100,2),'%)\n')
+cat('Color & Scene & Sound trials =', sum(behavData$Color.Scene.Sound),'(',round(((sum(behavData$Color.Scene.Sound))/nTotal)*100,2),'%)\n')
+
+```
+
+## Check for trial dependencies
+Test for the possibility that encoding success at trial t predicts encoding success on trial t+1 (due to proximity of offset betas to onset of next trial). 
+```{r}
+
+behavData.shift <- behavData[1:(nrow(behavData)-1),]
+behavData.shift$MQNext <- behavData$MemoryDetail[2:nrow(behavData)]
+
+# within subject and run, is there a relationship between memory detail on this trial and memory detail on the next trial?  
+behav.model <- lmer(MQNext ~ MemoryDetail + (1+MemoryDetail|SubID/Run), data=behavData.shift)
+
+kable(summary(behav.model)$coefficients, format="pandoc", caption='Dependency between subsequent memory detail on next trial\nand subsequent memory detail on the current trial')
+if ((summary(behav.model)$coefficients[2,"Pr(>|t|)"]) > .05) {
+  cat('\np > .05 -- No effect of encoding success on trial t on encoding success on trial t + 1')
+} else {
+   cat('\np < .05 -- Dependency in encoding: encoding success on trial t predicts encoding success on trial t+1')
+}
+
+```
+
+# Get ONSET data
+```{r}
+
+outlier_value = 4 #SD for removing extreme data (betas)
+cat('Removing influential onset betas, |z| >', outlier_value,'\n')
+
+############################# single trial activity data ##############################
+# get subjects
+subjects <- list.files(path=paste(myDir,'/data/single-trial-betas',sep=""),full.names=TRUE, recursive = TRUE, pattern = 'onset.csv')
+
+allData  = do.call(rbind, lapply(subjects, function(x) {read.csv(x, header = TRUE)}))
+
+allData$SubID=as.factor(allData$SubID)
+allData$Trial=as.factor(allData$Trial)
+allData$ROI <- as.factor(allData$ROI)
+
+rois = levels(allData$ROI)
+
+
+
+# ******************************************************** #
+
+### add z score of betas within region and subject to remove outliers:
+allData <- allData %>%
+               group_by(SubID, ROI) %>%
+               mutate(Z = zscore(MeanBeta))
+
+# remove betas that are > XSD -- print this number
+allData.clean <- allData
+allData.clean$MeanBeta[abs(allData.clean$Z) > outlier_value] <- NA  #mark beta as NA if outlier
+allData.clean <- allData.clean[,-c(6)] # remove Z values  
+allData.clean <- allData.clean[,-c(4)] # remove vox numbers - not needed here
+
+
+##########################################################
+#spread data so each of the 204 ROIs is in its own column
+myBetas = data.frame(spread(allData.clean, ROI, MeanBeta))
+
+# remove all trials where there is at least one NA (at least one of the ROIs is an outlier on that trial):
+idxBetas <- complete.cases(myBetas)
+cat('Total number of onset outliers removed =',sum(!idxBetas),'out of',nTotal,'\n\n')
+myBetas.clean <- myBetas[idxBetas,]
+
+
+# merge with behavioral data:
+
+# clean up behavioral data to match myBetas
+behavData.clean <- behavData[idxBetas,]
+
+testData <- cbind(myBetas.clean,behavData.clean)
+# remove duplicate columns for subject and study trial
+testData <- testData[,-c(1,2)]
+subjects <- unique(testData$SubID)
+
+onset.data <- testData  #store as onset betas
+onset.behav <- behavData.clean  #store as matching onset behavioral data
+
+cat('Cleaned and merged onset betas and behavioral trials\n')
+
+```
+
+# Get OFFSET data
+```{r}
+
+outlier_value = 4 #SD for removing extreme data (betas)
+cat('Removing influential offset betas, |z| >', outlier_value,'\n')
+
+############################# single trial activity data ##############################
+# get subjects
+subjects <- list.files(path=paste(myDir,'/data/single-trial-betas',sep=""),full.names=TRUE, recursive = TRUE, pattern = 'offset.csv')
+
+allData  = do.call(rbind, lapply(subjects, function(x) {read.csv(x, header = TRUE)}))
+
+allData$SubID=as.factor(allData$SubID)
+allData$Trial=as.factor(allData$Trial)
+allData$ROI <- as.factor(allData$ROI)
+
+rois = levels(allData$ROI)
+
+
+
+# ******************************************************** #
+
+### add z score of betas within region and subject to remove outliers:
+allData <- allData %>%
+               group_by(SubID, ROI) %>%
+               mutate(Z = zscore(MeanBeta))
+
+# remove betas that are > XSD -- print this number
+allData.clean <- allData
+allData.clean$MeanBeta[abs(allData.clean$Z) > outlier_value] <- NA  #mark beta as NA if outlier
+allData.clean <- allData.clean[,-c(6)] # remove Z values  
+allData.clean <- allData.clean[,-c(4)] # remove vox numbers - not needed here
+
+
+##########################################################
+#spread data so each of the 204 ROIs is in its own column
+myBetas = data.frame(spread(allData.clean, ROI, MeanBeta))
+
+# remove all trials where there is at least one NA (at least one of the ROIs is an outlier on that trial):
+idxBetas <- complete.cases(myBetas)
+cat('Total number of offset outliers removed =',sum(!idxBetas),'out of',nTotal,'\n\n')
+myBetas.clean <- myBetas[idxBetas,]
+
+
+# merge with behavioral data:
+
+# clean up behavioral data to match myBetas
+behavData.clean <- behavData[idxBetas,]
+
+testData <- cbind(myBetas.clean,behavData.clean)
+# remove duplicate columns for subject and study trial
+testData <- testData[,-c(1,2)]
+subjects <- unique(testData$SubID)
+
+offset.data <- testData #store as offset betas
+offset.behav <- behavData.clean #store as matching offset behavioral data
+
+cat('Cleaned and merged offset betas and behavioral trials\n')
+
+```
+
+# Whole brain analyses
+## Memory detail over time
+Where across the brain does activity at onset and/or offset linearly scale with memory quantity (0,1,2,3)?  
+```{r}
+
+### set up data frame for mixed effect model results:
+mixed.data <- data.frame(array(0,c(length(rois)*2,7)))
+colnames(mixed.data) <- c('ROI','Phase','Feature','Beta','SE','T','Pvalue')
+row = 0
+
+
+### loop over onset and offset
+for (phase in 1:2) {
+  
+  # gather data so behavioral variables are replicated over each ROI (now as a single column factor)
+  if (phase == 1) {
+    model.data <- gather(onset.data, ROI, Beta, 1:length(rois))
+    time = 'Onset'
+  } else if (phase == 2) {
+    model.data <- gather(offset.data, ROI, Beta, 1:length(rois))
+    time = 'Offset'
+  }
+  
+  # ******** run linear mixed effects within each ROI and store data ********** #
+  for (r in 1:length(rois)) {
+    
+    roiData <- subset(model.data, ROI == rois[r])
+    roiData$MemoryDetail <- scale(roiData$MemoryDetail, scale = FALSE) # mean-center predictor
+    
+    # run lmer and get fixed effect stats
+    full.model <- suppressMessages(lmer(Beta ~ MemoryDetail + 
+                                          (1 + MemoryDetail||SubID), data = roiData))
+    stats <- summary(full.model)$coefficients
+    nIV <- nrow(stats) # number of fixed effect predictors
+    
+    ### add fixed effects and p values to data matrix
+    mixed.data$ROI[(row+1):(row+nIV-1)]      <- as.character(rois[r])
+    mixed.data$Phase[(row+1):(row+nIV-1)]    <- time
+    mixed.data$Feature[(row+1):(row+nIV-1)]  <- 'MemoryDetail'
+    mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","Pr(>|t|)")]
+    row = row + nIV -1 #remove intercept
+  }
+}
+
+#### FDR-correct p-values for multiple comparisons
+mixed.data$Pfdr <- 1
+p.values <- mixed.data$Pvalue
+mixed.data$Pfdr <- p.adjust(p.values, method = "fdr")
+
+## save out parameter estimates and p values as csv file for creating a .nii map of results
+write.csv(mixed.data, file = paste(myDir,'analysis/wholebrain-csv-results/memorydetail_effects.csv',sep=""), row.names = FALSE)
+
+cat('Results saved in ~/analysis/wholebrain-csv-results/memorydetail_effects.csv')
+
+```
+
+## Unique feature encoding
+After accounting for covariance with the other two features in the model, which areas are uniquely predictd by successful color, scene, or sound encoding?  
+```{r}
+
+### set up data frame for mixed effect model results:
+mixed.data <- data.frame(array(0,c(length(rois)*6,7)))  # 3 features x 2 times
+colnames(mixed.data) <- c('ROI','Phase','Feature','Beta','SE','T','Pvalue')
+row = 0
+
+### loop over onset and offset
+for (phase in 1:2) {
+  
+  # gather data so behavioral variables are replicated over each ROI (now as a single column factor)
+  if (phase == 1) {
+    model.data <- gather(onset.data, ROI, Beta, 1:length(rois))
+    time = 'Onset'
+  } else if (phase == 2) {
+    model.data <- gather(offset.data, ROI, Beta, 1:length(rois))
+    time = 'Offset'
+  }
+  
+  # ******** run linear mixed effects within each ROI and store data for each feature fixed effect ********** #
+  for (r in 1:length(rois)) {
+    
+    roiData <- subset(model.data, ROI == rois[r])
+    roiData$Sound  <- scale(roiData$Sound, scale = FALSE) # mean-center
+    roiData$Color  <- scale(roiData$Color, scale = FALSE) # mean-center
+    roiData$Scene  <- scale(roiData$Scene, scale = FALSE) # mean-center
+    
+    # run lmer, simplify random effect structure as > 2 fixed effects, and get fixed effect stats
+    full.model <- suppressMessages(suppressWarnings(lmer(Beta ~ Sound + Color + Scene + 
+                                                           (1 + Sound + Color + Scene||SubID), data = roiData)))
+    full.model <- suppressMessages(suppressWarnings(get_model(step(full.model, reduce.random = TRUE, reduce.fixed = FALSE))))
+    stats <- summary(full.model)$coefficients
+    nIV <- nrow(stats)
+    
+    ### add fixed effects and p values to data matrix
+    mixed.data$ROI[(row+1):(row+nIV-1)]      <- as.character(rois[r])
+    mixed.data$Phase[(row+1):(row+nIV-1)]    <- time
+    mixed.data$Feature[(row+1):(row+nIV-1)]  <- row.names(stats)[2:(nIV)]
+    mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","Pr(>|t|)")]
+    row = row + nIV -1 #remove intercept
+  }
+}
+
+#### FDR-correct p-values for multiple comparisons
+mixed.data$Pfdr <- 1
+p.values <- mixed.data$Pvalue
+mixed.data$Pfdr <- p.adjust(p.values, method = "fdr")
+
+## save out parameter estimates and p values as csv file for creating a .nii map of results
+write.csv(mixed.data, file = paste(myDir,'analysis/wholebrain-csv-results/feature_effects.csv',sep=""), row.names = FALSE)
+
+cat('Results saved in ~/analysis/wholebrain-csv-results/feature_effects.csv')
+
+```
+
+# ROI visualization
+## Define regions and get data
+```{r}
+
+############ get rois ##############
+# 1. Offset memory detail response
+HIPP    <- c('LH_HIPP')
+
+# 3. Onset memory detail response
+IFG   <- c('LH_ContA_PFCl_3','LH_DefaultB_PFCv_4')
+
+# 2. Feature onset effects
+VTC   <- c('RH_Limbic_TempPole_4','RH_DorsAttnA_TempOcc_1','RH_VisCent_ExStr_2')  # Color
+AUD   <- c('RH_SomMotB_S2_1','LH_SomMotB_Aud_2','LH_SomMotB_Aud_1','RH_SomMotB_S2_2')  # Sound
+MTL   <- c('RH_DefaultC_PHC_1','LH_DefaultC_PHC_1','RH_DefaultC_Rsp_1','LH_DefaultC_Rsp_1')  # Scene
+
+myRois <- c(HIPP,IFG,VTC,AUD,MTL)
+newRois <- c('HIPP','IFG','VTC','AUD','MTL')
+mycolors <- c("#7c67a2","#ff9000","#F64F59","#1D976C","#009FFF")
+
+cat('Regions analyzed:\n\n',
+    'HIPP:',HIPP,'\n',
+    'IFG:',IFG,'\n',
+    'VTC:',VTC,'\n',
+    'AUD:',AUD,'\n',
+    'MTL:',MTL,'\n')
+
+
+##### onset data for rois
+model.data <- gather(onset.data, ROI, Beta, myRois)
+nleft <- length(rois) - length(myRois)
+model.data <- model.data[,-c(1:nleft)]
+
+### allocate global ROI
+model.data$NewROI[model.data$ROI %in% HIPP] <- 'HIPP'
+model.data$NewROI[model.data$ROI %in% IFG] <- 'IFG'
+model.data$NewROI[model.data$ROI %in% VTC] <- 'VTC'
+model.data$NewROI[model.data$ROI %in% AUD] <- 'AUD'
+model.data$NewROI[model.data$ROI %in% MTL] <- 'MTL'
+
+### now summarise within these new ROIs
+grouped.data <- model.data %>% group_by(SubID,StudyTrial,NewROI) %>%
+                        summarise(NewBeta = mean(Beta))
+grouped.data <- spread(grouped.data, NewROI, NewBeta)
+
+myROIData <- merge(grouped.data,onset.behav)
+model.data <- gather(myROIData, ROI, Beta, AUD:VTC)
+model.data.onset <- model.data
+
+
+##### offset data for rois
+model.data <- gather(offset.data, ROI, Beta, myRois)
+nleft <- length(rois) - length(myRois)
+model.data <- model.data[,-c(1:nleft)]
+
+### allocate global ROI
+model.data$NewROI[model.data$ROI %in% HIPP] <- 'HIPP'
+model.data$NewROI[model.data$ROI %in% IFG] <- 'IFG'
+model.data$NewROI[model.data$ROI %in% VTC] <- 'VTC'
+model.data$NewROI[model.data$ROI %in% AUD] <- 'AUD'
+model.data$NewROI[model.data$ROI %in% MTL] <- 'MTL'
+
+### now summarise within these new ROIs
+grouped.data <- model.data %>% group_by(SubID,StudyTrial,NewROI) %>%
+                        summarise(NewBeta = mean(Beta))
+grouped.data <- spread(grouped.data, NewROI, NewBeta)
+
+myROIData <- merge(grouped.data,offset.behav)
+model.data <- gather(myROIData, ROI, Beta, AUD:VTC)
+model.data.offset <- model.data
+
+
+###### combined onset and offset data
+idx.share <- intersect(model.data.onset$TotalEncodingTrial,model.data.offset$TotalEncodingTrial)
+model.onset.clean <- model.data.onset[model.data.onset$TotalEncodingTrial %in% idx.share,]
+model.onset.clean$Phase <- 'Onset'
+model.offset.clean <- model.data.offset[model.data.offset$TotalEncodingTrial %in% idx.share,]
+model.offset.clean$Phase <- 'Offset'
+
+model.data <- rbind(model.onset.clean,model.offset.clean)
+
+cat('\n\nNumber of trials excluded when joining onset and offset betas =',nrow(behavData)-length(idx.share),'/',nrow(behavData))
+
+```
+
+## Subsequent memory
+Now predicting memory detail or feature memory with onset and offset beta regressors to get unique variance and run offset - onset contrast per ROI  
+```{r, fig.width = 6.5, fig.height = 3}
+
+####################################
+mixed.data <- data.frame(array(0,c(length(newRois)*2,6)))
+colnames(mixed.data) <- c('ROI','Feature','Beta','SE','T','Pvalue')
+row = 0
+
+for (r in 1:length(newRois)) {
+  
+  roiData <- subset(model.data, ROI == newRois[r])
+  roiData <- spread(roiData, Phase, Beta)
+  roiData$Onset  <- zscore(roiData$Onset) # standardized
+  roiData$Offset <- zscore(roiData$Offset)
+  
+  if (r <= 2) {  # HIPP or IFG --> memory detail
+       roiData$MemoryDetail <- scale(roiData$MemoryDetail, scale = FALSE) # mean-center
+       # run lmer, simplify random effect structure, and get fixed effect stats
+       full.model <- suppressMessages(lmer(MemoryDetail ~ Onset + Offset + 
+                                                     (1 + Onset + Offset||SubID), data = roiData))
+  } else if (r == 3) {  # VTC --> Color
+       roiData$Color <- scale(roiData$Color, scale = FALSE) # mean-center
+       # run lmer, simplify random effect structure, and get fixed effect stats
+       full.model <- suppressMessages(lmer(Color ~ Onset + Offset + 
+                                              (1 + Onset + Offset||SubID), data = roiData))
+  } else if (r == 4) {  # AUD --> Sound
+       roiData$Sound <- scale(roiData$Sound, scale = FALSE) # mean-center
+       # run lmer, simplify random effect structure, and get fixed effect stats
+       full.model <- suppressMessages(lmer(Sound ~ Onset + Offset + 
+                                              (1 + Onset + Offset||SubID), data = roiData))
+  } else if (r == 5) {  # MTL --> Scene
+       roiData$Scene <- scale(roiData$Scene, scale = FALSE) # mean-center
+       # run lmer, simplify random effect structure, and get fixed effect stats
+       full.model <- suppressMessages(lmer(Scene ~ Onset + Offset + 
+                                              (1 + Onset + Offset||SubID), data = roiData))
+  }
+  
+  stats <- summary(full.model)$coefficients
+  nIV <- nrow(stats)
+  
+  # offset - onset (first regressor is intercept)
+  print(kable(contest(full.model,c(0,-1,1)), format="pandoc", caption=paste(newRois[r],': Offset - Onset',sep="")))
+
+  ### add fixed effects and p values to data matrix
+  mixed.data$ROI[(row+1):(row+nIV-1)]      <- as.character(newRois[r])
+  mixed.data$Feature[(row+1):(row+nIV-1)]  <- row.names(stats)[2:(nIV)]
+  mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","Pr(>|t|)")]
+  row = row + nIV -1 #remove intercept
+}
+
+mixed.data$ROI <- factor(mixed.data$ROI, levels=newRois)
+mixed.data$Feature <- factor(mixed.data$Feature, levels=c('Onset','Offset'))
+
+### print full output:
+print(kable(mixed.data,format="pandoc",caption = 'Memory onset and offset fixed effects for ROIs'))
+
+
+###### plot
+ggplot(mixed.data, aes(x=Feature, y=Beta, fill=Feature)) +
+     facet_grid(. ~ ROI) +
+     geom_hline(yintercept=0,size=1) +
+     geom_bar(stat = "identity", alpha = 0.75, size = 1, width = 0.75,
+              color = "black", position = position_dodge(1)) +
+     scale_fill_manual(values = c("#A6A6A6","#595959")) +
+     geom_errorbar(aes(ymin = Beta - SE, ymax = Beta + SE), width = 0.4, size = 1,
+                   color = "black", position = position_dodge(1)) +
+     theme(plot.title = element_text(hjust = 0.5, size=28, margin=margin(0,0,20,0)),
+          axis.line.x = element_line(color = "black", size = 1), axis.line.y = element_line(color = "black", size = 1),
+          axis.text.x = element_text(size = 22),
+          axis.text.y = element_text(size = 22), axis.title.y = element_text(size = 26),
+          axis.title.x = element_blank(), panel.background = element_blank(),
+          legend.position="none", strip.text.x = element_text(size=28), text = element_text(family="Helvetica"),
+          plot.margin = margin(1, 1, 1, 1, "cm"))
+
+```
+
+## Feature combinations for HIPP
+Which specific feature combinations is hippocampus sensitive to?  
+```{r, fig.width = 5, fig.height = 4}
+
+####################################
+mixed.data <- data.frame(array(0,c(7*2,6)))
+colnames(mixed.data) <- c('Phase','Feature','Beta','SE','T','Pvalue')
+row=0
+
+### loop over onset and offset
+for (phase in 1:2) {
+  
+  # gather data so behavioral variables are replicated over each ROI (now as a single column factor)
+  if (phase == 1) {
+       roiData <- subset(model.data.onset, ROI == 'HIPP')
+       feature = 'Onset'
+  } else if (phase == 2) {
+       roiData <- subset(model.data.offset, ROI == 'HIPP')
+       feature = 'Offset'
+  }
+
+  # NOTE. not mean-centering here as zero is meaningful -- excluding trials in other conditions. Implicit baseline = none recalled
+  full.model <- suppressMessages(lmer(Beta ~ Color.Only + Sound.Only + Scene.Only +
+                                             Color.Scene + Sound.Color + Scene.Sound +
+                                             Color.Scene.Sound +
+                                             (1 + Color.Only + Sound.Only + Scene.Only +
+                                             Color.Scene + Sound.Color + Scene.Sound +
+                                             Color.Scene.Sound||SubID), 
+                                             data = roiData))
+  full.model <- suppressMessages(get_model(step(full.model, reduce.random = TRUE, reduce.fixed = FALSE)))
+  stats <- summary(full.model)$coefficients
+  nIV <- nrow(stats)
+
+  # test if scene binding is > recalling scene alone (first position is intercept)
+  print(kable(contest(full.model,c(0,0,0,-1,(1/3),0,(1/3),(1/3))), format="pandoc", 
+              caption=paste('HIPP: Scene Binding vs. Scene Only at ',feature,sep="")))
+  
+  ### add fixed effects and p values to data matrix
+  mixed.data$Phase[(row+1):(row+nIV-1)]    <- feature
+  mixed.data$Feature[(row+1):(row+nIV-1)]  <- row.names(stats)[2:(nIV)]
+  mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","Pr(>|t|)")]
+  row = row + nIV -1 #remove intercept
+}
+
+
+##### PLOT
+order <- c("Color.Only","Scene.Only","Sound.Only","Sound.Color","Color.Scene","Scene.Sound","Color.Scene.Sound")
+# colors for venn diagram space feature combinations
+barcolors <- c("#f76c67","#67aaf7","#0bca81","#f6a84f","#9c67f7","#67f7f0","#7F7F7F")
+mixed.data$Feature <- factor(mixed.data$Feature, levels=order)
+mixed.data$Phase <- factor(mixed.data$Phase, levels=c('Onset','Offset'))
+
+ggplot(mixed.data, aes(x=Feature, y=Beta, fill=Feature)) +
+     facet_grid(. ~ Phase) +
+     geom_hline(yintercept=0,size=1) +
+     geom_bar(stat = "identity", alpha = 0.80, size = 1, width = 0.75,
+              color = "black", position = position_dodge(1)) +
+     scale_fill_manual(values = barcolors) +
+     geom_errorbar(aes(ymin = Beta - SE, ymax = Beta + SE), width = 0.4, size = 1,
+                   color = "black", position = position_dodge(1)) +
+     ggtitle('HIPP encoding activity vs. none recalled') +
+     theme(plot.title = element_text(hjust = 0.5, size=28, margin=margin(0,0,20,0)),
+          axis.line.x = element_line(color = "black", size = 1), axis.line.y = element_line(color = "black", size = 1),
+          axis.text.x = element_text(size = 16, angle = 45,hjust=1,vjust=1),
+          axis.text.y = element_text(size = 20), axis.title.y = element_text(size = 24),
+          axis.title.x = element_blank(), panel.background = element_blank(),
+          legend.position="none", strip.text.x = element_text(size=28), text = element_text(family="Helvetica"),
+          plot.margin = margin(1, 1, 1, 1, "cm"))
+
+```
