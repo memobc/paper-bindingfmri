@@ -1,4 +1,4 @@
-SubID,StudyTrial,TestTrial,Run,Valence,SoundID,ObjID,SceneID,ColStudy,SceStudy,Ques1,Ques2,ColTest,SceneTest,EmotionResponse,EmotionRT,EmotionCorrect,EmotionConfidence,ColResp,ColRT,SceneResp,SceneRT,ColError,SceError,ColAbsError,SceAbsError,onsetEncoding,TotalEncodingTrial
+SubID,StudyTrial,TestTrial,Run,Valence,SoundID,ObjID,SceneID,ColStudy,SceStudy,Ques1,Ques2,ColTest,SceneTest,SoundResponse,SoundRT,SoundCorrect,SoundConfidence,ColResp,ColRT,SceneResp,SceneRT,ColError,SceError,ColAbsError,SceAbsError,onsetEncoding,TotalEncodingTrial
 2,1,13,1,Neutral,12,37,1,279,162,1,2,150,321,3,1.119296464,1,0,201,-1,180,3.044534541,-78,18,78,18,1.01345166,1
 2,2,21,1,Neutral,7,139,5,3,42,1,2,123,213,-1,-1,0,-1,267,5.181004399,351,4.809900706,-96,-51,96,51,8.011146762,2
 2,3,18,1,Neutral,9,33,6,243,60,2,1,228,165,3,1.68288409,1,0,195,4.532968405,72,-1,-48,12,48,12,15.00899301,3

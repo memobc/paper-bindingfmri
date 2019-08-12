@@ -81,41 +81,42 @@ myDir <- '/Users/memolab/Google Drive/MemoLab/Manuscripts/Orbit-Encoding/paper-b
 behavData <- read.csv(paste(myDir,'data/AllSubjects_bindingfMRI-behavior.csv',sep = ""), header = TRUE)
 behav_subs <- unique(behavData$SubID)
 
-# Create additional columns for subsequent memory measures of interest
-behavData$Sound[behavData$EmotionCorrect == 1 & behavData$EmotionConfidence == 1] <- 1 # only sucessful if correct and high confidence
-behavData$Sound[behavData$EmotionCorrect == 1 & behavData$EmotionConfidence == 0] <- 0
-behavData$Sound[behavData$EmotionCorrect == 0] <- 0
+# ** note. behavioral data is already sorted by subject and encoding trial onset ** #
 
-# define 'success' thresholds for color and scene trials -> 75% probability within von Mises
+
+# Create additional columns for subsequent memory measures of interest -- Sound, Color, & Scene features ----------------------------
+behavData$Sound <- 0
+behavData$Sound[behavData$SoundCorrect == 1 & behavData$SoundConfidence == 1] <- 1 # only sucessful if correct *and* high confidence
+
+# define 'success' thresholds for color and scene trials -> 75% probability within von Mises for 27 subject aggregate data
 cCutOff = 42
 sCutOff = 24
 
 # feature accuracy
-behavData$Color[behavData$ColAbsError <=cCutOff] <- 1  #correct if error (how far from target) less than or equal to threshold
-behavData$Color[behavData$ColAbsError > cCutOff] <- 0
+behavData$Color <- 0
+behavData$Color[behavData$ColAbsError <=cCutOff] <- 1 #correct if error (how far from target) less than or equal to threshold
+behavData$Scene <- 0
 behavData$Scene[behavData$SceAbsError <=sCutOff] <- 1 #correct if error (how far from target) less than or equal to threshold
-behavData$Scene[behavData$SceAbsError > sCutOff] <- 0
 
 
 # overall memory detail (accounting for feature success - 0-3)
 behavData$MemoryDetail <- behavData$Sound + behavData$Color + behavData$Scene
 
 
-#### separate trial-unique conditions:
+#### separate trial-unique conditions based on feature combinations recalled --------------------
 ## 1 feature
 behavData$Color.Only   <- 0
 behavData$Sound.Only <- 0
 behavData$Scene.Only   <- 0
-behavData$Color.Only[behavData$Color == 1 & behavData$Sound == 0 & behavData$Scene == 0]   <- 1
-behavData$Sound.Only[behavData$Color == 0 & behavData$Sound == 1 & behavData$Scene == 0] <- 1
-behavData$Scene.Only[behavData$Color == 0 & behavData$Sound == 0 & behavData$Scene == 1]   <- 1
-behavData$OneFeature.Only <- behavData$Color.Only + behavData$Sound.Only + behavData$Scene.Only
+behavData$Color.Only[behavData$Color == 1 & behavData$Sound == 0 & behavData$Scene == 0]  <- 1
+behavData$Sound.Only[behavData$Color == 0 & behavData$Sound == 1 & behavData$Scene == 0]  <- 1
+behavData$Scene.Only[behavData$Color == 0 & behavData$Sound == 0 & behavData$Scene == 1]  <- 1
 
 ## 2 features
 behavData$Color.Scene   <- 0
 behavData$Sound.Color <- 0
 behavData$Scene.Sound <- 0
-behavData$Color.Scene[behavData$Color == 1 & behavData$Sound == 0 & behavData$Scene == 1]   <- 1
+behavData$Color.Scene[behavData$Color == 1 & behavData$Sound == 0 & behavData$Scene == 1] <- 1
 behavData$Sound.Color[behavData$Color == 1 & behavData$Sound == 1 & behavData$Scene == 0] <- 1
 behavData$Scene.Sound[behavData$Color == 0 & behavData$Sound == 1 & behavData$Scene == 1] <- 1
 
@@ -124,9 +125,8 @@ behavData$Color.Scene.Sound  <- 0
 behavData$Color.Scene.Sound[behavData$Color == 1 & behavData$Sound == 1 & behavData$Scene == 1] <- 1
 
 
-# ****now format behavioral data to match single trial beta ENCODING order**** -- by encoding onset:
-behavData <- behavData[order(behavData$StudyTrial),]
-behavData <- data.frame(behavData[order(behavData$SubID),])
+# double check encoding data is sorted correctly (by subject, then encoding onset)
+behavData <- behavData[order(behavData$TotalEncodingTrial),]
 
 nTotal <- nrow(behavData)
 
@@ -135,7 +135,7 @@ nTotal <- nrow(behavData)
 feature.accuracy <- behavData[,c("TotalEncodingTrial","Color","Sound","Scene")]
 kable(feature.accuracy %>% gather(Feature,Accuracy,Color:Scene) %>%
                           group_by(Feature) %>%
-                          summarise(Memory = mean(Accuracy)),format="pandoc",
+                          summarise(Memory = round(mean(Accuracy),3)),format="pandoc",
                                     caption="Feature Accuracy")
 
 ### print number of trials that uniquely fall into each possible combination:
@@ -158,7 +158,7 @@ behavData.shift <- behavData[1:(nrow(behavData)-1),]
 behavData.shift$MQNext <- behavData$MemoryDetail[2:nrow(behavData)]
 
 # within subject and run, is there a relationship between memory detail on this trial and memory detail on the next trial?  
-behav.model <- lmer(MQNext ~ MemoryDetail + (1+MemoryDetail|SubID/Run), data=behavData.shift)
+behav.model <- lmer(MQNext ~ MemoryDetail + (1+MemoryDetail||SubID/Run), data=behavData.shift)
 
 kable(summary(behav.model)$coefficients, format="pandoc", caption='Dependency between subsequent memory detail on next trial\nand subsequent memory detail on the current trial')
 if ((summary(behav.model)$coefficients[2,"Pr(>|t|)"]) > .05) {
@@ -184,6 +184,7 @@ allData  = do.call(rbind, lapply(subjects, function(x) {read.csv(x, header = TRU
 allData$SubID=as.factor(allData$SubID)
 allData$Trial=as.factor(allData$Trial)
 allData$ROI <- as.factor(allData$ROI)
+allData <- allData[,-c(4)] # remove vox numbers - not needed here
 
 rois = levels(allData$ROI)
 
@@ -199,13 +200,17 @@ allData <- allData %>%
 # remove betas that are > XSD -- print this number
 allData.clean <- allData
 allData.clean$MeanBeta[abs(allData.clean$Z) > outlier_value] <- NA  #mark beta as NA if outlier
-allData.clean <- allData.clean[,-c(6)] # remove Z values  
-allData.clean <- allData.clean[,-c(4)] # remove vox numbers - not needed here
+allData.clean <- allData.clean[,-c(5)] # remove Z values  
 
 
 ##########################################################
 #spread data so each of the 204 ROIs is in its own column
 myBetas = data.frame(spread(allData.clean, ROI, MeanBeta))
+#check still sorted by subject and onset, then add TotalEncodingTrial to match behavioral data:
+myBetas <- myBetas[order(myBetas$Trial),]
+myBetas <- myBetas[order(myBetas$SubID),]
+myBetas$TotalEncodingTrial <- 1:nTotal
+
 
 # remove all trials where there is at least one NA (at least one of the ROIs is an outlier on that trial):
 idxBetas <- complete.cases(myBetas)
@@ -213,17 +218,16 @@ cat('Total number of onset outliers removed =',sum(!idxBetas),'out of',nTotal,'\
 myBetas.clean <- myBetas[idxBetas,]
 
 
-# merge with behavioral data:
-
-# clean up behavioral data to match myBetas
+##### merge cleaned betas with behavioral data, removing corresponding behavioral trials:
 behavData.clean <- behavData[idxBetas,]
+testData <- merge.data.frame(myBetas.clean,behavData.clean,by="TotalEncodingTrial")
 
-testData <- cbind(myBetas.clean,behavData.clean)
 # remove duplicate columns for subject and study trial
-testData <- testData[,-c(1,2)]
+testData <- testData[,-c(2,3)]
+colnames(testData)[colnames(testData) == 'SubID.y'] <- 'SubID'
 subjects <- unique(testData$SubID)
 
-onset.data <- testData  #store as onset betas
+onset.data  <- testData  #store as onset betas
 onset.behav <- behavData.clean  #store as matching onset behavioral data
 
 cat('Cleaned and merged onset betas and behavioral trials\n')
@@ -245,6 +249,7 @@ allData  = do.call(rbind, lapply(subjects, function(x) {read.csv(x, header = TRU
 allData$SubID=as.factor(allData$SubID)
 allData$Trial=as.factor(allData$Trial)
 allData$ROI <- as.factor(allData$ROI)
+allData <- allData[,-c(4)] # remove vox numbers - not needed here
 
 rois = levels(allData$ROI)
 
@@ -260,13 +265,17 @@ allData <- allData %>%
 # remove betas that are > XSD -- print this number
 allData.clean <- allData
 allData.clean$MeanBeta[abs(allData.clean$Z) > outlier_value] <- NA  #mark beta as NA if outlier
-allData.clean <- allData.clean[,-c(6)] # remove Z values  
-allData.clean <- allData.clean[,-c(4)] # remove vox numbers - not needed here
+allData.clean <- allData.clean[,-c(5)] # remove Z values  
 
 
 ##########################################################
 #spread data so each of the 204 ROIs is in its own column
 myBetas = data.frame(spread(allData.clean, ROI, MeanBeta))
+#check still sorted by subject and onset, then add TotalEncodingTrial to match behavioral data:
+myBetas <- myBetas[order(myBetas$Trial),]
+myBetas <- myBetas[order(myBetas$SubID),]
+myBetas$TotalEncodingTrial <- 1:nTotal
+
 
 # remove all trials where there is at least one NA (at least one of the ROIs is an outlier on that trial):
 idxBetas <- complete.cases(myBetas)
@@ -274,18 +283,17 @@ cat('Total number of offset outliers removed =',sum(!idxBetas),'out of',nTotal,'
 myBetas.clean <- myBetas[idxBetas,]
 
 
-# merge with behavioral data:
-
-# clean up behavioral data to match myBetas
+##### merge cleaned betas with behavioral data, removing corresponding behavioral trials:
 behavData.clean <- behavData[idxBetas,]
+testData <- merge.data.frame(myBetas.clean,behavData.clean,by="TotalEncodingTrial")
 
-testData <- cbind(myBetas.clean,behavData.clean)
 # remove duplicate columns for subject and study trial
-testData <- testData[,-c(1,2)]
+testData <- testData[,-c(2,3)]
+colnames(testData)[colnames(testData) == 'SubID.y'] <- 'SubID'
 subjects <- unique(testData$SubID)
 
-offset.data <- testData #store as offset betas
-offset.behav <- behavData.clean #store as matching offset behavioral data
+offset.data  <- testData  #store as onset betas
+offset.behav <- behavData.clean  #store as matching onset behavioral data
 
 cat('Cleaned and merged offset betas and behavioral trials\n')
 
@@ -297,8 +305,8 @@ Where across the brain does activity at onset and/or offset linearly scale with 
 ```{r}
 
 ### set up data frame for mixed effect model results:
-mixed.data <- data.frame(array(0,c(length(rois)*2,7)))
-colnames(mixed.data) <- c('ROI','Phase','Feature','Beta','SE','T','Pvalue')
+mixed.data <- data.frame(array(0,c(length(rois)*2,8)))
+colnames(mixed.data) <- c('ROI','Phase','Feature','Beta','SE','T','Df','Pvalue')
 row = 0
 
 
@@ -307,10 +315,10 @@ for (phase in 1:2) {
   
   # gather data so behavioral variables are replicated over each ROI (now as a single column factor)
   if (phase == 1) {
-    model.data <- gather(onset.data, ROI, Beta, 1:length(rois))
+    model.data <- gather(onset.data, ROI, Beta, rois)
     time = 'Onset'
   } else if (phase == 2) {
-    model.data <- gather(offset.data, ROI, Beta, 1:length(rois))
+    model.data <- gather(offset.data, ROI, Beta, rois)
     time = 'Offset'
   }
   
@@ -330,7 +338,7 @@ for (phase in 1:2) {
     mixed.data$ROI[(row+1):(row+nIV-1)]      <- as.character(rois[r])
     mixed.data$Phase[(row+1):(row+nIV-1)]    <- time
     mixed.data$Feature[(row+1):(row+nIV-1)]  <- 'MemoryDetail'
-    mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","Pr(>|t|)")]
+    mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Df","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","df","Pr(>|t|)")]
     row = row + nIV -1 #remove intercept
   }
 }
@@ -352,8 +360,8 @@ After accounting for covariance with the other two features in the model, which 
 ```{r}
 
 ### set up data frame for mixed effect model results:
-mixed.data <- data.frame(array(0,c(length(rois)*6,7)))  # 3 features x 2 times
-colnames(mixed.data) <- c('ROI','Phase','Feature','Beta','SE','T','Pvalue')
+mixed.data <- data.frame(array(0,c(length(rois)*6,8)))  # 3 features x 2 times
+colnames(mixed.data) <- c('ROI','Phase','Feature','Beta','SE','T','Df','Pvalue')
 row = 0
 
 ### loop over onset and offset
@@ -361,10 +369,10 @@ for (phase in 1:2) {
   
   # gather data so behavioral variables are replicated over each ROI (now as a single column factor)
   if (phase == 1) {
-    model.data <- gather(onset.data, ROI, Beta, 1:length(rois))
+    model.data <- gather(onset.data, ROI, Beta, rois)
     time = 'Onset'
   } else if (phase == 2) {
-    model.data <- gather(offset.data, ROI, Beta, 1:length(rois))
+    model.data <- gather(offset.data, ROI, Beta, rois)
     time = 'Offset'
   }
   
@@ -387,7 +395,7 @@ for (phase in 1:2) {
     mixed.data$ROI[(row+1):(row+nIV-1)]      <- as.character(rois[r])
     mixed.data$Phase[(row+1):(row+nIV-1)]    <- time
     mixed.data$Feature[(row+1):(row+nIV-1)]  <- row.names(stats)[2:(nIV)]
-    mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","Pr(>|t|)")]
+    mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Df","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","df","Pr(>|t|)")]
     row = row + nIV -1 #remove intercept
   }
 }
@@ -494,8 +502,8 @@ Now predicting memory detail or feature memory with onset and offset beta regres
 ```{r, fig.width = 6.5, fig.height = 3}
 
 ####################################
-mixed.data <- data.frame(array(0,c(length(newRois)*2,6)))
-colnames(mixed.data) <- c('ROI','Feature','Beta','SE','T','Pvalue')
+mixed.data <- data.frame(array(0,c(length(newRois)*2,7)))
+colnames(mixed.data) <- c('ROI','Feature','Beta','SE','T','Df','Pvalue')
 row = 0
 
 for (r in 1:length(newRois)) {
@@ -536,7 +544,7 @@ for (r in 1:length(newRois)) {
   ### add fixed effects and p values to data matrix
   mixed.data$ROI[(row+1):(row+nIV-1)]      <- as.character(newRois[r])
   mixed.data$Feature[(row+1):(row+nIV-1)]  <- row.names(stats)[2:(nIV)]
-  mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","Pr(>|t|)")]
+  mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Df","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","df","Pr(>|t|)")]
   row = row + nIV -1 #remove intercept
 }
 
@@ -572,7 +580,7 @@ Which specific feature combinations is hippocampus sensitive to?
 
 ####################################
 mixed.data <- data.frame(array(0,c(7*2,6)))
-colnames(mixed.data) <- c('Phase','Feature','Beta','SE','T','Pvalue')
+colnames(mixed.data) <- c('Feature','Beta','SE','T','Df','Pvalue')
 row=0
 
 ### loop over onset and offset
@@ -606,10 +614,12 @@ for (phase in 1:2) {
   ### add fixed effects and p values to data matrix
   mixed.data$Phase[(row+1):(row+nIV-1)]    <- feature
   mixed.data$Feature[(row+1):(row+nIV-1)]  <- row.names(stats)[2:(nIV)]
-  mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","Pr(>|t|)")]
+  mixed.data[(row+1):(row+nIV-1),c("Beta","SE","T","Df","Pvalue")] <- stats[2:(nIV),c("Estimate","Std. Error","t value","df","Pr(>|t|)")]
   row = row + nIV -1 #remove intercept
 }
 
+### print full output:
+print(kable(mixed.data,format="pandoc",caption = 'Feature combinations (vs. none recalled) for L HIPP'))
 
 ##### PLOT
 order <- c("Color.Only","Scene.Only","Sound.Only","Sound.Color","Color.Scene","Scene.Sound","Color.Scene.Sound")
