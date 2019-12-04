@@ -30,11 +30,11 @@ code.r{ /* Code block */
 
 The analyses presented here test subsequent memory effects during encoding of a multi-feature event (from the GitHub repository: https://github.com/memobc/paper-bindingfmri).    
 
-Mean single trial beta estimates at i) onset and ii) offset of each visual display (onset N and offset N are 6s apart) were extracted from each of 204 ROIs across the cortex and medial temporal lobe (see ~/data/bindingfmri_wholebrain_ROIs_info.csv). *Onsets* are used to test the relationship between brain activity and memory for the *upcoming event*, *offsets* are used to test the relationship between brain activity and memory for the *preceding event*.
+Mean single trial beta estimates at i) onset and ii) offset of each visual display (onset N and offset N are 6s apart) were extracted from each of 204 ROIs across the cortex and medial temporal lobe (see ~/data/bindingfmri_wholebrain_ROIs_info.csv). *Onsets* are used to test the relationship between brain activity and memory for the *upcoming event*, whereas *offsets* are used to test the relationship between brain activity and memory for the *preceding event*.
 
-Each event includes 3 associations encoded in parallel -- an object with a i) color, ii) sound, and iii) scene location.  
+Each event includes 3 associations encoded in parallel -- an object with an associated i) color, ii) sound, and iii) scene location.  
 
-Subsequent memory is calculated as the number of features (0-3) later correctly recalled, as well as feature-specific estimates of memory (correct, 1, vs. incorrect, 0). 
+Subsequent memory detail is calculated as the number of features (0-3) later correctly recalled. Feature-specific estimates of subsequent memory are also analyzed (correct, 1, vs. incorrect, 0). 
 The relationship between activity (each ROI's beta series) and subsequent memory is estimated using linear mixed effects (LME) models with the following pipeline:  
 
 1) Data are cleaned by removing any trials with outlying betas (z > |4|), calculated within subject per ROI  
@@ -861,6 +861,60 @@ cat('Results saved in',curFile)
 
 ```
 
+### Control analysis - event epoch
+Like for overall memory detail, here we are predicting activity through the entire 6s trial (onset to offset) with subsequent memory for each feature.  
+```{r}
+
+curFile = 'feature_effects_eventepoch.csv'
+
+### set up data frame for mixed effect model results:
+mixed.data <- data.frame(array(0,c(length(rois)*3,8)))  # *3 features
+colnames(mixed.data) <- c('ROI','Phase','Feature','Beta','SE','T','Df','Pvalue')
+row = 0
+
+
+model.data <- gather(epoch.data, ROI, Beta, rois)
+time = 'Epoch'
+
+# ******** run linear mixed effects within each ROI and store results for each feature fixed effect **********
+for (r in 1:length(rois)) {
+  
+  thisROI <- as.character(rois[r])
+  
+  roiData <- subset(model.data, ROI == thisROI)
+  roiData$Sound  <- scale(roiData$Sound, scale = FALSE) # mean-center
+  roiData$Color  <- scale(roiData$Color, scale = FALSE) # mean-center
+  roiData$Scene  <- scale(roiData$Scene, scale = FALSE) # mean-center
+  
+  # run lmer, simplify random effect structure as > 2 fixed effects, and get fixed effect stats
+  full.model <- suppressMessages(suppressWarnings(lmer(Beta ~ Sound + Color + Scene + 
+                                                         (1 + Sound + Color + Scene||SubID), data = roiData)))
+  full.model <- suppressMessages(suppressWarnings(get_model(step(full.model, 
+                                                                 reduce.random = TRUE, reduce.fixed = FALSE))))
+  stats <- summary(full.model)$coefficients
+  nIV <- nrow(stats) - 1 # number of fixed effects, discounting intercept
+  
+  ### add fixed effects and p values to data matrix
+  mixed.data$ROI[(row+1):(row+nIV)]      <- thisROI
+  mixed.data$Phase[(row+1):(row+nIV)]    <- time
+  mixed.data$Feature[(row+1):(row+nIV)]  <- row.names(stats)[2:(nIV+1)]
+  mixed.data[(row+1):(row+nIV),c("Beta","SE","T","Df","Pvalue")] <- stats[2:(nIV+1),
+                                                                          c("Estimate","Std. Error","t value","df","Pr(>|t|)")]
+  row = row + nIV
+}
+
+#### FDR-correct all p-values for multiple comparisons
+mixed.data$Pfdr <- 1
+p.values <- mixed.data$Pvalue
+mixed.data$Pfdr <- p.adjust(p.values, method = "fdr")
+
+## save out parameter estimates and p values as csv file for creating a .nii map of results
+write.csv(mixed.data, file = curFile, row.names = FALSE)
+
+cat('Results saved in',curFile)
+
+```
+
 # ROI visualization
 ## Define regions and data
 Note, here we are predicting memory on trial N from onset N *and* offset N (in the same model) to test and contrast unique variance of fixed effects    
@@ -1215,6 +1269,7 @@ segment.info <- segment.info[idxBetas,]
 segment.info <- gather(segment.info, Segment, Beta, Anterior:Posterior)
 
   
+
 ####################################
 mixed.data <- data.frame(array(0,c(7*2,7)))
 colnames(mixed.data) <- c('Segment','Feature','Beta','SE','T','Df','Pvalue')
